@@ -93,7 +93,7 @@ The system consists of 5 primary agents utilizing distinct AI design patterns:
 
 | Layer | Technology | Justification |
 | :--- | :--- | :--- |
-| **Agent Framework** | AutoGen / Semantic Kernel | Robust support for multi-agent orchestration and tool invocation. |
+| **Agent Framework** | Microsoft Agent Framework | Robust support for multi-agent orchestration and tool invocation. |
 | **LLM Engine** | GPT-4o / Claude 3.5 Sonnet | High-level reasoning required for academic advisory and dynamic planning. |
 | **Web Interaction** | Playwright / BeautifulSoup | Playwright handles both dynamic scraping and automated form submission. |
 | **Memory / RAG** | ChromaDB + sentence-transformers | Lightweight, local execution, ideal for prototyping. |
