@@ -1,17 +1,18 @@
 """
-Researcher Agent - Collects and Extracts university admissions information
+Researcher Agent — Collections and Extracts university admissions information.
 
-Uses Azure AI Agent Service (azure-ai-agents SDK) with:
-- GPT-4o for reasoning and extraction
-- FunctionTool: scrape_url, search_admission_info, query_knowledge_base
-- create_and_process_run to automatically process tool calls
+Using Microsoft Agent Framework (agent-framework >= 1.2.2) with:
+- FoundryChatClient  : connects to Azure AI Foundry
+- @tool decorator    : registers tools
+- agent.run()        : automatically handles the entire tool-call loop
+- response.text      : Retrieves the final agent
 
 Flow:
     Input (URL/query + student profile)
-    → AgentsClient.create_and_process_run()
-    → Tool calls (web scrape / RAG)
-    → GPT-4o analysis + extract
-    → ResearchResult (structured JSON)
+    → FoundryChatClient.as_agent(tools=[...])
+    → agent.run(message)          ← framework call tools automatically
+    → response.text               ← final result
+    → _parse_research_result()    ← extract JSON → ResearchResult
     → AgentState.research_result
 """
 from __future__ import annotations
@@ -19,74 +20,84 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import ast
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from datetime import timezone
 
-from azure.ai.agents import AgentsClient
-from azure.ai.agents.models import (
-    FunctionTool,
-    MessageRole,
-    RunStatus,
-    ToolSet,
-)
-from azure.core.credentials import AzureKeyCredential
+from agent_framework import tool, Agent
+from agent_framework.foundry import FoundryChatClient
+from azure.identity import DefaultAzureCredential, AzureCliCredential
 
 from app.agents.base import BaseAgent
 from app.schemas.agent_state import AgentState, ResearchResult, UniversityInfo
-from app.tools.web_search_tool import (
-    SCRAPE_URL_DEFINITION,
-    SEARCH_ADMISSION_DEFINITION,
-    TOOL_FUNCTIONS as WEB_TOOL_FUNCTIONS,
-)
-from app.tools.rag_tool import (
-    QUERY_KB_DEFINITION,
-    TOOL_FUNCTIONS as RAG_TOOL_FUNCTIONS,
-)
+from app.tools.web_search_tool import ALL_SEARCH_TOOLS
+from app.tools.rag_tool import ALL_RAG_TOOLS
 
 logger = logging.getLogger(__name__)
 
-# ── Merge all tool functions ──
-ALL_TOOL_FUNCTIONS = {**WEB_TOOL_FUNCTIONS, **RAG_TOOL_FUNCTIONS}
+# All the tools Researcher Agent can use
+ALL_RESEARCHER_TOOLS = ALL_SEARCH_TOOLS + ALL_RAG_TOOLS
 
+
+# =============================================================================
+# Helper functions
+# =============================================================================
 
 def _load_prompt() -> str:
-    """Read system prompt from file."""
-    prompt_path = Path(__file__).parent.parent / "prompts" / "researcher.txt"
+    """Read system prompt from file prompts/researcher.txt."""
+    prompt_path = Path(__file__).parent.parent / "prompts" / "researcher.txt" # Todo: enumerate pathname folder
     if prompt_path.exists():
         return prompt_path.read_text(encoding="utf-8")
-    return "You are a researcher agent that collects university admission information."
+    
+    logger.warning(f"Prompt file not found: {prompt_path}")
+    return (
+        "You are a researcher agent that collects and extracts "
+        "Vietnamese university admission information."
+    )
 
 
 def _build_user_message(state: AgentState) -> str:
     """
-    Tạo user message từ AgentState.
-    Bao gồm profile học sinh + câu hỏi / URL cần nghiên cứu.
+    Create user message from AgentState.
+    Includes: student's request + profile + URL to be researched
     """
     profile = state.student_profile
     parts = []
 
     if state.user_message:
-        parts.append(f"**Yêu cầu của học sinh:** {state.user_message}")
+        parts.append(f"**Student's request:** {state.user_message}")
 
     if profile.name:
         parts.append(
-            f"**Thông tin học sinh:**\n"
-            f"- Tên: {profile.name}\n"
-            f"- GPA: {profile.gpa or 'Chưa có'}\n"
-            f"- Điểm mục tiêu: {json.dumps(profile.target_scores, ensure_ascii=False)}\n"
-            f"- Ngành mong muốn: {', '.join(profile.preferred_majors) or 'Chưa xác định'}\n"
-            f"- Trường mong muốn: {', '.join(profile.preferred_universities) or 'Chưa xác định'}"
+            f"**Student information:**\n"
+            f"- Name: {profile.name}\n"
+            f"- GPA: {profile.gpa or 'Not yet'}\n"
+            f"- Target Scores: {json.dumps(profile.target_scores, ensure_ascii=False)}\n"
+            f"- Preferred Major: {', '.join(profile.preferred_majors) or 'Not determined'}\n"
+            f"- Preferred University: {', '.join(profile.preferred_universities) or 'Not determined'}"
         )
 
     if state.input_urls:
         parts.append(
-            f"**URL cần phân tích:**\n" + "\n".join(f"- {u}" for u in state.input_urls)
+            "**URL to Analyze:**\n"
+            + "\n".join(f"- {u}" for u in state.input_urls)
         )
 
     parts.append(
-        "\n**Yêu cầu output:** Trả về JSON hợp lệ theo schema ResearchResult với các trường: "
-        "universities, general_requirements, important_deadlines, admission_methods, "
-        "raw_summary, sources."
+        # Todo: fix hardcode on here
+        "\n**Request for output:** Return valid JSON according to schema ResearchResult:\n"
+        "{\n"
+        '  "universities": [{university_name, major, benchmark_score, admission_method,\n'
+        '                    required_documents, deadline, tuition_fee, website, source_url, notes}],\n'
+        '  "general_requirements": [...],\n'
+        '  "important_deadlines": {"deadline name": "date"},\n'
+        '  "admission_methods": [...],\n'
+        '  "raw_summary": "brief summary",\n'
+        '  "sources": ["url1", "url2"]\n'
+        "}"
     )
 
     return "\n\n".join(parts)
@@ -94,252 +105,313 @@ def _build_user_message(state: AgentState) -> str:
 
 def _parse_research_result(raw_text: str) -> ResearchResult:
     """
-    Parse JSON từ response của agent thành ResearchResult.
-    Xử lý các trường hợp agent trả về text kèm JSON.
+    Parse JSON from the agent's response into ResearchResult.
+    Priority: pure JSON → fenced block → raw scan → raw_summary fallback.
     """
-    # Tìm JSON block trong response
-    text = raw_text.strip()
+    text = (raw_text or "").strip()
+    if not text:
+        return ResearchResult(raw_summary="", sources=[])
 
-    # Thử parse trực tiếp
-    try:
-        data = json.loads(text)
-        return _dict_to_research_result(data)
-    except json.JSONDecodeError:
-        pass
+    EXPECTED_KEYS = frozenset({
+        "universities", "general_requirements", "important_deadlines",
+        "admission_methods", "raw_summary", "sources", "query",
+    })
 
-    # Tìm JSON trong markdown code block
-    import re
-    json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if json_match:
+    # ── Helpers ────────────────────────────────────────────────────────────────
+
+    def _coerce(obj) -> Optional[dict]:
+        if isinstance(obj, dict):
+            return obj
+        if isinstance(obj, list):
+            return {"universities": obj}
+        return None
+
+    def _try_parse(candidate: str) -> Optional[dict]:
+        """Strict JSON → ast.literal_eval fallback."""
+        if not candidate:
+            return None
         try:
-            data = json.loads(json_match.group(1))
-            return _dict_to_research_result(data)
-        except json.JSONDecodeError:
+            return _coerce(json.loads(candidate))
+        except (json.JSONDecodeError, ValueError):
             pass
-
-    # Tìm JSON object trong text thô
-    brace_match = re.search(r"\{.*\}", text, re.DOTALL)
-    if brace_match:
         try:
-            data = json.loads(brace_match.group(0))
-            return _dict_to_research_result(data)
-        except json.JSONDecodeError:
-            pass
+            return _coerce(ast.literal_eval(candidate))
+        except Exception:
+            return None
 
-    # Fallback: tạo result từ raw text
-    logger.warning("Could not parse structured JSON from researcher. Using raw_summary fallback.")
+    def _best_json_in_text(candidate: str) -> Optional[dict]:
+        """
+        Scan for all JSON objects/arrays in candidate; return the one whose
+        keys overlap most with EXPECTED_KEYS.  Short-circuits when a clearly
+        matching object is found.
+        """
+        if not candidate:
+            return None
+
+        decoder = json.JSONDecoder()
+        best: Optional[dict] = None
+        best_score = -1
+
+        for m in re.finditer(r"[{\[]", candidate):
+            try:
+                obj, _ = decoder.raw_decode(candidate, m.start())
+            except json.JSONDecodeError:
+                continue
+
+            as_dict = _coerce(obj)
+            if as_dict is None:
+                continue
+
+            score = len(EXPECTED_KEYS & as_dict.keys())
+            if score > best_score:
+                best, best_score = as_dict, score
+                if score >= 2 and ("universities" in as_dict or "sources" in as_dict):
+                    return best  # good enough — stop early
+
+        return best
+
+    # ── Try 1: whole text is pure JSON / python-literal ────────────────────────
+    decoded = _try_parse(text)
+    if decoded is not None:
+        return _dict_to_research_result(decoded)
+
+    # ── Try 2: fenced code block (``` or ```json) — most explicit signal ───────
+    # Collect ALL fenced blocks and pick the best-scoring one.
+    best_from_fence: Optional[dict] = None
+    best_fence_score = -1
+
+    for fence_match in re.finditer(r"```(?:json|JSON)?\s*(.*?)\s*```", text, re.DOTALL):
+        fenced = fence_match.group(1).strip()
+        candidate = _try_parse(fenced) or _best_json_in_text(fenced)
+        if candidate is None:
+            continue
+        score = len(EXPECTED_KEYS & candidate.keys())
+        if score > best_fence_score:
+            best_from_fence, best_fence_score = candidate, score
+
+    if best_from_fence is not None:
+        return _dict_to_research_result(best_from_fence)
+
+    # ── Try 3: raw scan of the entire text ────────────────────────────────────
+    decoded = _best_json_in_text(text)
+    if decoded is not None:
+        return _dict_to_research_result(decoded)
+
+    # ── Fallback: keep raw text as summary ────────────────────────────────────
+    logger.warning(
+        "Could not parse structured JSON from researcher response; "
+        "falling back to raw_summary. text[:400]=%r",
+        text[:400].replace("\n", "\\n"),
+    )
     return ResearchResult(raw_summary=text, sources=[])
 
 
 def _dict_to_research_result(data: dict) -> ResearchResult:
-    """Chuyển dict thành ResearchResult Pydantic model."""
+    """Convert the dict into a ResearchResult Pydantic model, process the partial data."""
+    def _as_list(value) -> list:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, tuple):
+            return list(value)
+        if isinstance(value, str):
+            v = value.strip()
+            return [v] if v else []
+        return [value]
+
+    def _as_dict(value) -> dict:
+        if isinstance(value, dict):
+            return value
+        return {}
+
+    def _as_str_str_dict(value) -> dict[str, str]:
+        """Coerce to dict[str, str], dropping invalid/None entries."""
+        raw = _as_dict(value)
+        out: dict[str, str] = {}
+        for k, v in raw.items():
+            if k is None:
+                continue
+            key = str(k).strip()
+            if not key:
+                continue
+            if v is None:
+                # Don't include null deadlines; schema expects strings.
+                continue
+            if isinstance(v, (dict, list, tuple)):
+                val = json.dumps(v, ensure_ascii=False)
+            else:
+                val = str(v)
+            val = val.strip()
+            if not val:
+                continue
+            out[key] = val
+        return out
+
+    def _as_str(value) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    def _as_float_or_none(value):
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError:
+                return None
+        return None
+
     universities = []
     for u in data.get("universities", []):
-        universities.append(
-            UniversityInfo(
-                university_name=u.get("university_name", ""),
-                major=u.get("major", ""),
-                benchmark_score=u.get("benchmark_score"),
-                admission_method=u.get("admission_method", ""),
-                required_documents=u.get("required_documents", []),
-                deadline=u.get("deadline"),
-                tuition_fee=u.get("tuition_fee"),
-                website=u.get("website"),
-                source_url=u.get("source_url"),
-                notes=u.get("notes", ""),
-            )
-        )
+        if not isinstance(u, dict):
+            continue
+
+        payload = {
+            # Todo: enumerate field name of class
+            "university_name": _as_str(u.get("university_name")),
+            "major": _as_str(u.get("major")),
+            "benchmark_score": _as_float_or_none(u.get("benchmark_score")),
+            "admission_method": _as_str(u.get("admission_method")),
+            "required_documents": _as_list(u.get("required_documents")),
+            "deadline": u.get("deadline"),
+            "tuition_fee": u.get("tuition_fee"),
+            "website": u.get("website"),
+            "source_url": u.get("source_url"),
+            "notes": _as_str(u.get("notes")),
+        }
+
+        try:
+            universities.append(UniversityInfo(**payload))
+        except Exception as e:
+            logger.warning(f"Skipping invalid university entry: {e}. Entry={payload!r}")
+            continue
 
     return ResearchResult(
-        query=data.get("query", ""),
+        query=_as_str(data.get("query", "")),
         universities=universities,
-        general_requirements=data.get("general_requirements", []),
-        important_deadlines=data.get("important_deadlines", {}),
-        admission_methods=data.get("admission_methods", []),
-        raw_summary=data.get("raw_summary", ""),
-        sources=data.get("sources", []),
+        general_requirements=_as_list(data.get("general_requirements", [])),
+        important_deadlines=_as_str_str_dict(data.get("important_deadlines", {})),
+        admission_methods=_as_list(data.get("admission_methods", [])),
+        raw_summary=_as_str(data.get("raw_summary", "")),
+        sources=_as_list(data.get("sources", [])),
     )
 
 
+def _get_credential():
+    """
+    Get Azure credential in order of priority:
+    1. DefaultAzureCredential (support Managed Identity, CLI, env)
+    2. AzureCliCredential (fallback for local dev)
+    """
+    try:
+        return DefaultAzureCredential()
+    except Exception:
+        return AzureCliCredential()
+
+
+# =============================================================================
+# ResearcherAgent class
+# =============================================================================
+
 class ResearcherAgent(BaseAgent):
     """
-    Researcher Agent sử dụng Azure AI Agent Service.
+    The Researcher Agent uses Microsoft Agent Framework (FoundryChatClient).
 
-    Công nghệ:
-    - azure-ai-agents: AgentsClient, FunctionTool, ToolSet
-    - create_and_process_run: tự động handle tool_calls loop
-    - GPT-4o deployment: gpt-4o-admission
+    How it works:
+    1. Initialize FoundryChatClient with FOUNDRY_PROJECT_ENDPOINT + credential
+    2. Create an Agent with .as_agent(tools=[...], instructions=...)
+    3. Call agent.run(message) - the framework handles it automatically:
+       - Send a message to LLM (GPT-4o, GPT4.1,...)
+       - Receives a tool call request
+       - Executes tool (search_admission_articles / query_knowledge_base / scrape_url)
+       - Sends the tool's results back to LLM
+       - Repeats until a final answer is obtained
+    4. Parse response.text → ResearchResult
     """
 
     name = "researcher"
-    description = "Thu thập và trích xuất thông tin tuyển sinh từ nguồn bên ngoài"
+    description = "Collections and Extracts university admissions information"
 
     def __init__(self, verbose: bool = False):
         super().__init__(verbose=verbose)
-        self._client: Optional[AgentsClient] = None
-        self._agent_id: Optional[str] = None
+        self._foundry_agent: Optional[Agent] = None
 
-    def _get_client(self) -> AgentsClient:
-        """Lazy-init AgentsClient."""
-        if self._client is None:
-            connection_string = os.environ.get("AZURE_AI_PROJECT_CONNECTION_STRING")
-
-            if connection_string:
-                # Sử dụng connection string (ưu tiên)
-                self._client = AgentsClient.from_connection_string(
-                    conn_str=connection_string,
-                    credential=AzureKeyCredential(os.environ["AZURE_OPENAI_API_KEY"]),
-                )
-            else:
-                # Fallback: dùng endpoint + key
-                self._client = AgentsClient(
-                    endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-                    credential=AzureKeyCredential(os.environ["AZURE_OPENAI_API_KEY"]),
-                )
-
-            self.log("AgentsClient initialized.", "info")
-        return self._client
-
-    def _build_toolset(self) -> ToolSet:
+    def _get_agent(self) -> Agent:
         """
-        Xây dựng ToolSet với các FunctionTool.
-        Azure AI Agent sẽ tự quyết định khi nào gọi tool nào.
+        Lazy-init Foundry Agent.
+
+        FoundryChatClient read FOUNDRY_PROJECT_ENDPOINT from the environment if
+        it's not passed directly
         """
-        tools = [
-            FunctionTool(definitions=[SCRAPE_URL_DEFINITION]),
-            FunctionTool(definitions=[SEARCH_ADMISSION_DEFINITION]),
-            FunctionTool(definitions=[QUERY_KB_DEFINITION]),
-        ]
-        return ToolSet(tools=tools)
+        if self._foundry_agent is None:
+            project_endpoint = os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
+            model = os.environ.get("FOUNDRY_MODEL", "gpt-4o-admission")
 
-    def _get_or_create_agent(self, client: AgentsClient) -> str:
-        """
-        Tạo hoặc lấy agent ID đã tồn tại.
-        Trong production nên cache agent_id vào DB để tái sử dụng.
-        """
-        if self._agent_id:
-            return self._agent_id
+            if not project_endpoint:
+                raise EnvironmentError("Missing variable FOUNDRY_PROJECT_ENDPOINT in .env.\n")
 
-        toolset = self._build_toolset()
-        system_prompt = _load_prompt()
+            client = FoundryChatClient(
+                project_endpoint=project_endpoint,
+                model=model,
+                credential=_get_credential(),
+            )
 
-        agent = client.create_agent(
-            model=os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-admission"),
-            name="ResearcherAgent",
-            instructions=system_prompt,
-            tools=toolset.definitions,
-            tool_resources=toolset.resources,
-        )
+            self._foundry_agent = client.as_agent(
+                name="ResearcherAgent",
+                instructions=_load_prompt(),
+                tools=ALL_RESEARCHER_TOOLS,
+            )
 
-        self._agent_id = agent.id
-        self.log(f"Created Azure AI Agent: {self._agent_id}", "info")
-        return self._agent_id
+            self.log(
+                f"FoundryChatClient initialized. Endpoint: {project_endpoint} | Model: {model}",
+                "info",
+            )
 
-    def _dispatch_tool_call(self, tool_name: str, tool_args_str: str) -> str:
-        """
-        Thực thi tool call được yêu cầu bởi agent.
-
-        Args:
-            tool_name: Tên function cần gọi.
-            tool_args_str: Arguments dạng JSON string.
-
-        Returns:
-            Kết quả tool dưới dạng string.
-        """
-        func = ALL_TOOL_FUNCTIONS.get(tool_name)
-        if func is None:
-            return json.dumps({"error": f"Unknown tool: {tool_name}"})
-
-        try:
-            args = json.loads(tool_args_str) if tool_args_str else {}
-            self.log(f"Calling tool '{tool_name}' with args: {args}", "info")
-            result = func(**args)
-            return result
-        except Exception as e:
-            logger.error(f"Tool '{tool_name}' execution failed: {e}")
-            return json.dumps({"error": str(e)})
+        return self._foundry_agent
 
     async def run(self, state: AgentState) -> AgentState:
         """
-        Chạy Researcher Agent:
-        1. Tạo thread + message
-        2. create_and_process_run (auto tool-call loop)
-        3. Parse kết quả → ResearchResult
-        4. Cập nhật AgentState
+        Run the Researcher Agent and update AgentState with result.
 
         Args:
-            state: AgentState chứa student_profile, user_message, input_urls.
+            state: AgentState contains student_profile, user_message, input_urls.
 
         Returns:
-            AgentState với research_result đã được điền.
+            AgentState has been update with research_result.
         """
         state.current_agent = self.name
         self.log("Starting research task...", "info")
 
-        client = self._get_client()
-
         try:
-            agent_id = self._get_or_create_agent(client)
-
-            # Tạo thread mới cho session này
-            thread = client.threads.create()
-            self.log(f"Created thread: {thread.id}", "info")
-
-            # Thêm user message
+            agent = self._get_agent()
             user_message = _build_user_message(state)
-            client.messages.create(
-                thread_id=thread.id,
-                role=MessageRole.USER,
-                content=user_message,
-            )
 
-            # Chạy agent với auto tool-call handling
-            # create_and_process_run tự động gọi tool → submit result → tiếp tục
-            run = client.runs.create_and_process(
-                thread_id=thread.id,
-                agent_id=agent_id,
-                # Override tool execution với custom dispatcher
-                # Note: azure-ai-agents >= 1.1.0 hỗ trợ toolset parameter
-                # để auto-dispatch, hoặc dùng manual loop dưới đây
-            )
+            self.log(f"Sending message to agent ({len(user_message)} chars)...", "info")
 
-            if run.status == RunStatus.REQUIRES_ACTION:
-                # Manual tool execution loop (fallback nếu auto không hoạt động)
-                run = self._handle_tool_calls_loop(client, thread.id, run)
+            # agent.run() automatically:
+            # - Send message
+            # - Handle tool calls (search / rag / scrape)
+            # - Return AgentResponse when finished
+            response = await agent.run(user_message)
 
-            if run.status != RunStatus.COMPLETED:
-                error_msg = f"Run ended with status: {run.status}"
-                logger.error(error_msg)
-                state.add_error(error_msg)
-                state.research_result = ResearchResult(raw_summary="Research failed.")
-                return state
-
-            # Lấy message cuối cùng từ assistant
-            messages = client.messages.list(thread_id=thread.id, order="desc")
-            assistant_text = ""
-            for msg in messages:
-                if msg.role == MessageRole.ASSISTANT:
-                    for content_block in msg.content:
-                        if hasattr(content_block, "text"):
-                            assistant_text = content_block.text.value
-                            break
-                    if assistant_text:
-                        break
-
-            self.log(f"Raw response length: {len(assistant_text)} chars", "info")
+            raw_text = response.text
+            self.log(f"Raw response: {len(raw_text)} chars", "info")
 
             # Parse kết quả
-            research_result = _parse_research_result(assistant_text)
+            research_result = _parse_research_result(raw_text)
             research_result.query = state.user_message
-
-            from datetime import datetime
-            research_result.researched_at = datetime.utcnow()
+            research_result.researched_at = datetime.now(timezone.utc)
 
             state.research_result = research_result
             state.mark_agent_done(self.name)
 
             self.log(
-                f"Research complete. Found {len(research_result.universities)} universities.",
+                f"Research complete. Found {len(research_result.universities)} universities, "
+                f"{len(research_result.sources)} sources.",
                 "info",
             )
 
@@ -347,63 +419,28 @@ class ResearcherAgent(BaseAgent):
             logger.exception(f"ResearcherAgent failed: {e}")
             state.add_error(f"ResearcherAgent error: {str(e)}")
             state.research_result = ResearchResult(
-                raw_summary=f"Research failed due to error: {str(e)}"
+                raw_summary=f"Research failed: {str(e)}"
             )
 
         return state
 
-    def _handle_tool_calls_loop(self, client: AgentsClient, thread_id: str, run) -> object:
+    async def run_stream(self, state: AgentState):
         """
-        Manual tool execution loop cho trường hợp cần xử lý thủ công.
-        Được dùng khi create_and_process_run không tự dispatch tool.
+        Streaming version of run() - yield individual chunk of text.
+        Used for WebSocket endpoint or realtime UI.
+
+        Usage:
+            async for chunk in researcher.run_stream(state):
+                print(chunk, end="", flush=True)
         """
-        import time
+        try:
+            agent = self._get_agent()
+            user_message = _build_user_message(state)
 
-        max_iterations = 10
-        iteration = 0
+            async for chunk in agent.run(user_message, stream=True):
+                if chunk.text:
+                    yield chunk.text
 
-        while run.status == RunStatus.REQUIRES_ACTION and iteration < max_iterations:
-            iteration += 1
-            self.log(f"Tool call loop iteration {iteration}", "info")
-
-            tool_outputs = []
-
-            required_action = run.required_action
-            if required_action and hasattr(required_action, "submit_tool_outputs"):
-                for tool_call in required_action.submit_tool_outputs.tool_calls:
-                    tool_name = tool_call.function.name
-                    tool_args = tool_call.function.arguments
-
-                    output = self._dispatch_tool_call(tool_name, tool_args)
-                    tool_outputs.append(
-                        {"tool_call_id": tool_call.id, "output": output}
-                    )
-
-            # Submit tool results
-            run = client.runs.submit_tool_outputs(
-                thread_id=thread_id,
-                run_id=run.id,
-                tool_outputs=tool_outputs,
-            )
-
-            # Poll until status changes
-            poll_count = 0
-            while run.status in (RunStatus.IN_PROGRESS, RunStatus.QUEUED) and poll_count < 30:
-                time.sleep(1)
-                run = client.runs.get(thread_id=thread_id, run_id=run.id)
-                poll_count += 1
-
-        return run
-
-    def cleanup(self) -> None:
-        """
-        Dọn dẹp agent khi không còn dùng nữa.
-        Trong production: nên giữ agent_id và tái sử dụng.
-        """
-        if self._agent_id and self._client:
-            try:
-                self._client.delete_agent(self._agent_id)
-                self.log(f"Deleted agent: {self._agent_id}", "info")
-                self._agent_id = None
-            except Exception as e:
-                logger.warning(f"Failed to delete agent: {e}")
+        except Exception as e:
+            logger.exception(f"ResearcherAgent stream failed: {e}")
+            yield f"[ERROR] {str(e)}"

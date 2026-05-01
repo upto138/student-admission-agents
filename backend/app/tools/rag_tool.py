@@ -1,7 +1,7 @@
 """
 RAG Tool - Retrieval-Augmented Generation using ChromaDB + Azure OpenAI Embeddings
 
-The Tool is registered with Azure AI Agent as a FunctionTool
+This tool is registered with FoundryChatClient agent as a @tool decorator
 It allow Researcher Agent query the knowledge base saved from previous crawls
 """
 from __future__ import annotations
@@ -12,6 +12,7 @@ import os
 from typing import Callable
 # from typing import Optional
 
+from agent_framework import tool
 from openai import AzureOpenAI
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ COLLECTION_NAME = "admission_knowledge"
 TOP_K = 5  # default numeber of document returned
 
 def _get_embedding_client() -> AzureOpenAI:
-    """Initalize Azure OpenAI client for embedding"""
+    """Initialize Azure OpenAI client for embedding"""
     global _embedding_client
     if _embedding_client is None:
         _embedding_client = AzureOpenAI(
@@ -37,7 +38,7 @@ def _get_embedding_client() -> AzureOpenAI:
 
 
 def _get_collection():
-    """Initalize ChromaDB collection"""
+    """Initialize ChromaDB collection"""
     global _chroma_client, _collection
     if _collection is None:
         try:
@@ -71,6 +72,7 @@ def embed_text(text: str) -> list[float]:
     return response.data[0].embedding
 
 
+@tool(approval_mode="never_require")
 def query_knowledge_base(query: str, top_k: int = TOP_K) -> str:
     """
     Query knowledge base to find information related to the query
@@ -162,33 +164,4 @@ def add_to_knowledge_base(content: str, source_url: str, university: str = "", y
         logger.error(f"Failed to add to knowledge base: {e}")
         return json.dumps({"success": False, "error": str(e)})
 
-
-# ── Defind function schema for registration with Azure AI Agent ───
-
-QUERY_KB_DEFINITION = {
-    "name": "query_knowledge_base",
-    "description": (
-        "Query the internal knowledge base to retrieve addmission stored information"
-        "Use RAG with ChromaDB. "
-        "Use when you need information about addmission scores application requirements and selection methods from previous years"
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "Questions or keywords to search wihini the knowledge base",
-            },
-            "top_k": {
-                "type": "integer",
-                "description": "Maximum number of related documents to retrieve (default 5)",
-                "default": 5,
-            },
-        },
-        "required": ["query"],
-    },
-}
-
-TOOL_FUNCTIONS: dict[str, Callable[..., str]] = {
-    "query_knowledge_base": query_knowledge_base,
-}
+ALL_RAG_TOOLS = [ query_knowledge_base ]

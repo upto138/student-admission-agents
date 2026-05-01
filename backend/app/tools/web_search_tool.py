@@ -1,11 +1,11 @@
 """
-Web Search Tool - allows Researcher Agent to gather information from teh web
+Web Search Tool - allows Researcher Agent to gather information from the web
 
 Support 2 modes:
 1. Scrape a specific URL (BeautifulSoup)
 2. Search via Bing Search API (if you have the key)
 
-This tool is registered with Azure AI Agent as a FunctionTool
+This tool is registered with FoundryChatClient agent as a @tool decorator
 """
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ import logging
 from typing import Callable
 # from typing import Optional
 # from urllib.parse import urlparse
+
+from agent_framework import tool
 
 import requests
 from bs4 import BeautifulSoup
@@ -30,7 +32,7 @@ HEADERS = {
 TIMEOUT = 15  # seconds
 MAX_CONTENT_CHARS = 6000  # Avoid exceeding context window
 
-
+@tool(approval_mode="never_require")
 def scrape_url(url: str) -> str:
     """
     Scrape text content from a URL
@@ -81,6 +83,7 @@ def scrape_url(url: str) -> str:
         return json.dumps({"url": url, "title": "", "content": "", "error": str(e)}, ensure_ascii=False)
 
 # Todo: Integrate Azure AI Search
+@tool(approval_mode="never_require")
 def search_admission_info(query: str, num_results: int = 5) -> str:
     """
     Search for admissions information on the web (demo: return mock data if Bing key is not availability)
@@ -159,52 +162,5 @@ def _suggest_urls_for_query(query: str) -> list[str]:
 
     return urls
 
-
-# ── Define function schema for registration with Azure AI Agent ───
-
-SCRAPE_URL_DEFINITION = {
-    "name": "scrape_url",
-    "description": (
-        "Collecting text content from a specific URL"
-        "Used to read admission information from university website or newspapers"
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "url": {
-                "type": "string",
-                "description": "Full URL for data scrape (includes https://)",
-            }
-        },
-        "required": ["url"],
-    },
-}
-
-SEARCH_ADMISSION_DEFINITION = {
-    "name": "search_admission_info",
-    "description": (
-        "Search for university admission information on the web"
-        "Used this when you need to find admission scores, application methods or application deadlines"
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "The question or search keyword, for example: 'University of Science, VNU-HCM admission scores 2025'",
-            },
-            "num_results": {
-                "type": "integer",
-                "description": "Maximum number of result to retrieve (default 5)",
-                "default": 5,
-            },
-        },
-        "required": ["query"],
-    },
-}
-
-# Map tool name → callable for dispatcher calling
-TOOL_FUNCTIONS: dict[str, Callable[..., str]] = {
-    "scrape_url": scrape_url,
-    "search_admission_info": search_admission_info,
-}
+# List of tools to import into researcher.py
+ALL_SEARCH_TOOLS = [ scrape_url, search_admission_info ]

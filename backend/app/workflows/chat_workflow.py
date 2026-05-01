@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import AsyncIterator
 
 from app.agents.researcher import ResearcherAgent
 from app.schemas.agent_state import AgentState, StudentProfile
@@ -67,6 +68,17 @@ class ChatWorkflow:
 
         logger.info(f"[Workflow] Session {state.session_id} completed. Agents: {state.completed_agents}")
         return state
+    
+    async def run_stream(self, state: AgentState) -> AsyncIterator[str]:
+        """
+        Streaming version — yield text chunks from Researcher Agent in real time.
+        Used for WebSocket endpoint.
+        """
+        if not state.session_id:
+            state.session_id = str(uuid.uuid4())
+ 
+        async for chunk in self.researcher.run_stream(state):
+            yield chunk
 
     @classmethod
     def create_initial_state(
