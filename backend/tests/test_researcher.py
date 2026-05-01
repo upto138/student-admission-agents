@@ -101,7 +101,7 @@ async def test_stream():
 
 
 def _print_result(state):
-    """In kết quả ra console theo format dễ đọc."""
+    """Print the results to the console in an easy-to-read format."""
     print(f"\n{'─'*50}")
     print(f"Session ID  : {state.session_id}")
     print(f"Agents done : {state.completed_agents}")
@@ -116,7 +116,11 @@ def _print_result(state):
 
     print(f"\nResearchResult:")
     print(f"   Query          : {result.query[:80] if result.query else 'N/A'}")
-    print(f"   Universities   : {len(result.universities)}")
+    if result.universities:
+        uni_names = ', '.join([u.university_name for u in result.universities if u.university_name])
+        print(f"   Universities   : {uni_names} ({len(result.universities)})")
+    else:
+        print(f"   Universities   : 0")
     print(f"   Sources        : {len(result.sources)}")
     print(f"   Methods        : {result.admission_methods}")
 

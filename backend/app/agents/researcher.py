@@ -32,6 +32,7 @@ from agent_framework.foundry import FoundryChatClient
 from azure.identity import DefaultAzureCredential, AzureCliCredential
 
 from app.agents.base import BaseAgent
+from app.ingestion.normalizers.to_knowledge_base import ingest_university_data
 from app.schemas.agent_state import AgentState, ResearchResult, UniversityInfo
 from app.tools.web_search_tool import ALL_SEARCH_TOOLS
 from app.tools.rag_tool import ALL_RAG_TOOLS
@@ -204,6 +205,77 @@ def _parse_research_result(raw_text: str) -> ResearchResult:
         text[:400].replace("\n", "\\n"),
     )
     return ResearchResult(raw_summary=text, sources=[])
+
+
+def _build_ingestion_items(result: ResearchResult) -> list[dict]:
+    items: list[dict] = []
+    default_year = str(datetime.now(timezone.utc).year)
+
+    for u in result.universities:
+        content_parts = []
+        if u.university_name:
+            content_parts.append(f"University: {u.university_name}")
+        if u.major:
+            content_parts.append(f"Major: {u.major}")
+        if u.benchmark_score is not None:
+            content_parts.append(f"Benchmark score: {u.benchmark_score}")
+        if u.admission_method:
+            content_parts.append(f"Admission method: {u.admission_method}")
+        if u.required_documents:
+            content_parts.append(f"Required documents: {', '.join(u.required_documents)}")
+        if u.deadline:
+            content_parts.append(f"Deadline: {u.deadline}")
+        if u.tuition_fee:
+            content_parts.append(f"Tuition fee: {u.tuition_fee}")
+        if u.website:
+            content_parts.append(f"Website: {u.website}")
+        if u.notes:
+            content_parts.append(f"Notes: {u.notes}")
+
+        content = "\n".join(content_parts).strip()
+        if not content:
+            continue
+
+        source_url = u.source_url or (result.sources[0] if len(result.sources) == 1 else "")
+        items.append(
+            {
+                "content": content,
+                "source_url": source_url,
+                "university": u.university_name or "",
+                "year": default_year,
+            }
+        )
+
+    general_parts = []
+    if result.general_requirements:
+        general_parts.append(
+            f"General requirements: {', '.join(result.general_requirements)}"
+        )
+    if result.admission_methods:
+        general_parts.append(
+            f"Admission methods: {', '.join(result.admission_methods)}"
+        )
+    if result.important_deadlines:
+        deadlines = "; ".join(
+            f"{k}: {v}" for k, v in result.important_deadlines.items()
+        )
+        general_parts.append(f"Important deadlines: {deadlines}")
+    if result.raw_summary:
+        general_parts.append(f"Summary: {result.raw_summary}")
+
+    general_content = "\n".join(general_parts).strip()
+    if general_content:
+        source_url = result.sources[0] if len(result.sources) == 1 else ""
+        items.append(
+            {
+                "content": general_content,
+                "source_url": source_url,
+                "university": "",
+                "year": default_year,
+            }
+        )
+
+    return items
 
 
 def _dict_to_research_result(data: dict) -> ResearchResult:
@@ -408,6 +480,20 @@ class ResearcherAgent(BaseAgent):
 
             state.research_result = research_result
             state.mark_agent_done(self.name)
+
+            ingestion_items = _build_ingestion_items(research_result)
+            if ingestion_items:
+                try:
+                    ingestion_results = ingest_university_data(ingestion_items)
+                    self.log(
+                        f"Ingested {len(ingestion_results)} items into knowledge base.",
+                        "info",
+                    )
+                except Exception as e:
+                    logger.exception(f"Ingestion failed: {e}")
+                    state.add_error(f"Ingestion error: {str(e)}")
+            else:
+                self.log("No ingestion items to add.", "info")
 
             self.log(
                 f"Research complete. Found {len(research_result.universities)} universities, "

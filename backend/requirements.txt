@@ -11,6 +11,7 @@ azure-identity>=1.19.0          # DefaultAzureCredential, AzureCliCredential
 azure-search-documents>=11.6.0  # Azure AI Search client
 azure-ai-projects>=2.1.0        # AIProjectClient
 azure-core>=1.35.0
+azure-search-documents>=11.4.0
 
 # =============================================================================
 # OpenAI — Using for Embedding (RAG)

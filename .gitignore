@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Ignore ChromaDB vector store data
+backend/data/chroma/
+data/chroma/
+*.bin
+*.sqlite3
+
+.DS_Store
