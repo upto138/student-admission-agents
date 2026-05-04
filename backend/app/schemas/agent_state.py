@@ -1,5 +1,16 @@
 """
-Shared state object are passed to all agents in the workflow
+Shared state object are passed to all agents in the workflow.
+
+Schemas:
+  StudentProfile    — thông tin học sinh (input)
+  UniversityInfo    — thông tin một trường/ngành
+  ResearchResult    — output của ResearcherAgent
+  ChecklistItem     — một mục trong danh sách hồ sơ (output Planner)
+  TimelineTask      — một mốc trong timeline chuẩn bị (output Planner)
+  PlanResult        — toàn bộ output của PlannerAgent
+  AdmissionStep     — một bước trong quy trình tuyển sinh
+  AdmissionPlan     — kế hoạch tổng thể (legacy, đơn giản hơn PlanResult)
+  AgentState        — state dùng chung cho toàn bộ pipeline
 """
 from __future__ import annotations
 
@@ -46,6 +57,55 @@ class ResearchResult(BaseModel):
     researched_at: Optional[datetime] = None
 
 
+# =============================================================================
+# Planner Agent schemas
+# =============================================================================
+
+class ChecklistItem(BaseModel):
+    """
+    Một mục trong danh sách hồ sơ cần chuẩn bị.
+
+    source phải là một trong:
+      admission_news   — lấy từ bài báo tuyển sinh
+      rag              — lấy từ knowledge base (ChromaDB / Azure Search)
+      student_profile  — suy ra từ hồ sơ học sinh
+      inferred         — suy luận, không có nguồn rõ ràng → status nên là need_review
+    """
+    title: str
+    status: str = "pending"      # ready | pending | need_review
+    required: bool = True
+    reason: str = ""
+    source: str = ""             # admission_news | rag | student_profile | inferred
+
+
+class TimelineTask(BaseModel):
+    """
+    Một mốc trong timeline chuẩn bị hồ sơ.
+    Nếu deadline từ bài báo là null → date = None, mô tả dùng 'as soon as possible'.
+    """
+    date: Optional[str] = None   # ISO date hoặc None
+    task: str
+    priority: str = "medium"     # high | medium | low
+    reason: str = ""
+
+
+class PlanResult(BaseModel):
+    """
+    Output đầy đủ của PlannerAgent.
+    Khớp chính xác với schema PlanResult trong project-docs.md.
+
+    Lưu ý:
+      - Agent 3 bị chặn bởi Orchestrator nếu missing_questions không rỗng.
+      - Mọi ChecklistItem phải có source; nếu source = inferred thì status = need_review.
+      - Nếu deadline từ Researcher là null, các TimelineTask không được chứa ngày cụ thể.
+    """
+    missing_questions: List[str] = Field(default_factory=list)
+    checklist: List[ChecklistItem] = Field(default_factory=list)
+    timeline: List[TimelineTask] = Field(default_factory=list)
+    risks: List[str] = Field(default_factory=list)
+    needs_human_confirmation: bool = False
+
+
 class AdmissionStep(BaseModel):
     """One step in the selection process"""
     step_number: int
@@ -81,7 +141,8 @@ class AgentState(BaseModel):
 
     # Agent outputs (filled in gradually along the pipeline)
     research_result: Optional[ResearchResult] = None
-    admission_plan: Optional[AdmissionPlan] = None
+    plan_result: Optional[PlanResult] = None
+    admission_plan: Optional[AdmissionPlan] = None  # legacy — dùng plan_result thay thế
     advisor_response: str = ""
     application_status: str = ""  # draft / pending_confirmation / submitted / failed
 

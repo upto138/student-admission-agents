@@ -1,11 +1,14 @@
 """
-Chat Workflow — Entry point for conversational flow.
+Chat Workflow — Entry point cho conversational flow.
 
-Orchestrates the agents following order:
+Orchestrates các agent theo thứ tự:
     Researcher → Planner → Advisor → Application
 
-Currently, this file fully implements the Researcher step.
-The subsequent agents (Planner, Advisor, Application) will be added later.
+Hiện tại:
+    Bước 1 (Researcher)  ✔ Hoàn chỉnh
+    Bước 2 (Planner)    ✔ Hoàn chỉnh
+    Bước 3 (Advisor)    TODO
+    Bước 4 (Application) TODO
 """
 from __future__ import annotations
 
@@ -14,6 +17,7 @@ import uuid
 from typing import AsyncIterator
 
 from app.agents.researcher import ResearcherAgent
+from app.agents.planner import PlannerAgent
 from app.schemas.agent_state import AgentState, StudentProfile
 
 logger = logging.getLogger(__name__)
@@ -21,52 +25,72 @@ logger = logging.getLogger(__name__)
 
 class ChatWorkflow:
     """
-    Orchestrator coordinates the entire pipeline recruitment pipeline.
-    Currently: only running Researcher Agent.
-    Will be expanded to include Planner, Advisor, Application.
+    Orchestrator điều phối toàn bộ pipeline tuyển sinh.
+
+    Pipeline hiện tại:
+      Bước 1: ResearcherAgent  — Thu thập và trích xuất thông tin tuyển sinh
+      Bước 2: PlannerAgent     — Lập checklist + timeline + phát hiện thiếu thông tin
+      (Bước 3: AdvisorAgent)  — TODO
+      (Bước 4: ApplicationAgent) — TODO nếu user xác nhận
     """
 
     def __init__(self, verbose: bool = False):
         self.researcher = ResearcherAgent(verbose=verbose)
+        self.planner = PlannerAgent(verbose=verbose)
         self.verbose = verbose
 
     async def run(self, state: AgentState) -> AgentState:
         """
-        Run the entire workflow from input to output.
+        Chạy toàn bộ workflow từ input đến output.
 
-        Current Pipeline:
-        1. Researcher Agent — Gather information
-        (2. Planner Agent — Plan) → TODO
-        (3. Advisor Agent — Explain)    → TODO
-        (4. Application Agent — Submit application) → TODO if user confirm
+        Pipeline:
+          1. ResearcherAgent — thu thập thông tin tuyển sinh từ URL/query
+          2. PlannerAgent    — lập checklist + timeline, chặn Agent 3 nếu thiếu thông tin
+          3. AdvisorAgent    — TODO
+          4. ApplicationAgent — TODO (chỉ chạy sau khi học sinh xác nhận)
 
         Args:
-            state: AgentState has student_profile and user_message.
+            state: AgentState có student_profile và user_message.
 
         Returns:
-            AgentState has been fully completed by all agents.
+            AgentState đã được cập nhật bởi các agent.
         """
         if not state.session_id:
             state.session_id = str(uuid.uuid4())
 
-        logger.info(f"[Workflow] Starting session: {state.session_id}")
+        logger.info(f"[Workflow] Bắt đầu session: {state.session_id}")
 
-        # ── Step 1: Researcher ─────────────────────────────────────────────────
-        logger.info("[Workflow] → Running Researcher Agent")
+        # ── Bước 1: Researcher ────────────────────────────────────────────
+        logger.info("[Workflow] → Chạy ResearcherAgent")
         state = await self.researcher.run(state)
 
         if state.errors:
-            logger.warning(f"[Workflow] Errors after Researcher: {state.errors}")
+            logger.warning(f"[Workflow] Lỗi sau Researcher: {state.errors}")
 
-        # ── Step 2: Planner (TODO) ─────────────────────────────────────────────
-        # from app.agents.planner import PlannerAgent
-        # state = await PlannerAgent(verbose=self.verbose).run(state)
+        # ── Bước 2: Planner ───────────────────────────────────────────
+        if state.research_result and not state.errors:
+            logger.info("[Workflow] → Chạy PlannerAgent")
+            state = await self.planner.run(state)
+        else:
+            logger.warning(
+                "[Workflow] Bỏ qua PlannerAgent do Researcher không có kết quả "
+                "hoặc có lỗi."
+            )
 
-        # ── Step 3: Advisor (TODO) ─────────────────────────────────────────────
+        # ── Bước 3: Advisor (TODO) ───────────────────────────────────
         # from app.agents.advisor import AdvisorAgent
         # state = await AdvisorAgent(verbose=self.verbose).run(state)
 
-        logger.info(f"[Workflow] Session {state.session_id} completed. Agents: {state.completed_agents}")
+        # ── Bước 4: Application (TODO) ───────────────────────────────
+        # Chỉ chạy sau khi học sinh xác nhận (state.requires_confirmation = False)
+        # from app.agents.application_agent import ApplicationAgent
+        # if not state.requires_confirmation:
+        #     state = await ApplicationAgent(verbose=self.verbose).run(state)
+
+        logger.info(
+            f"[Workflow] Session {state.session_id} hoàn tất. "
+            f"Agents đã chạy: {state.completed_agents}"
+        )
         return state
     
     async def run_stream(self, state: AgentState) -> AsyncIterator[str]:

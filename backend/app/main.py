@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Load the .env file before importing agent modules
 load_dotenv()
@@ -59,8 +59,9 @@ class ChatRequest(BaseModel):
 
 
 class ResearchResponse(BaseModel):
-    """Simplified response for frontend."""
+    """Response cho endpoint /chat."""
     session_id: str
+    # ── Researcher fields ──
     raw_summary: str
     universities_count: int
     universities: list
@@ -68,6 +69,11 @@ class ResearchResponse(BaseModel):
     important_deadlines: dict
     admission_methods: list
     sources: list
+    # ── Planner fields ──
+    plan_result: Optional[Dict[str, Any]] = None
+    missing_questions: List[str] = Field(default_factory=list)
+    needs_human_confirmation: bool = False
+    # ── Metadata ──
     errors: list
     completed_agents: list
 
@@ -129,6 +135,15 @@ async def chat(request: ChatRequest):
             important_deadlines=result.important_deadlines,
             admission_methods=result.admission_methods,
             sources=result.sources,
+            # ── Planner fields ──
+            plan_result=state.plan_result.model_dump() if state.plan_result else None,
+            missing_questions=(
+                state.plan_result.missing_questions if state.plan_result else []
+            ),
+            needs_human_confirmation=(
+                state.plan_result.needs_human_confirmation if state.plan_result else False
+            ),
+            # ── Metadata ──
             errors=state.errors,
             completed_agents=state.completed_agents,
         )
