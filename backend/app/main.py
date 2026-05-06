@@ -73,6 +73,9 @@ class ResearchResponse(BaseModel):
     plan_result: Optional[Dict[str, Any]] = None
     missing_questions: List[str] = Field(default_factory=list)
     needs_human_confirmation: bool = False
+    # ── HITL / Pipeline state ──
+    requires_confirmation: bool = False   # True = pipeline bị chặn (HITL gate)
+    application_status: str = ""          # pending_info | pending_confirmation | ""
     # ── Metadata ──
     errors: list
     completed_agents: list
@@ -85,9 +88,9 @@ async def health_check():
     """Health check endpoint."""
     return {
         "status": "ok",
-        "agents": ["researcher", "planner (coming)", "advisor (coming)", "application (coming)"],
-        "azure_endpoint": os.environ.get("AZURE_OPENAI_ENDPOINT", "NOT SET"),
-        "deployment": os.environ.get("AZURE_OPENAI_DEPLOYMENT", "NOT SET"),
+        "agents": ["researcher", "planner", "advisor (coming)", "application (coming)"],
+        "foundry_endpoint": os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "NOT SET"),
+        "foundry_model": os.environ.get("FOUNDRY_MODEL", "NOT SET"),
     }
 
 
@@ -96,8 +99,8 @@ async def chat(request: ChatRequest):
     """
     The main endpoint - Receive requests from student and run the workflow.
 
-    Currently only running Researcher Agent.
-    Will be expanded to include Planner, Advisor, Application Agents.
+    Current pipeline: ResearcherAgent → PlannerAgent.
+    TODO: AdvisorAgent → ApplicationAgent.
     """
     logger.info(f"[API] /chat received: '{request.message[:80]}...' | URLs: {len(request.urls)}")
 
@@ -143,6 +146,9 @@ async def chat(request: ChatRequest):
             needs_human_confirmation=(
                 state.plan_result.needs_human_confirmation if state.plan_result else False
             ),
+            # ── HITL / Pipeline state ──
+            requires_confirmation=state.requires_confirmation,
+            application_status=state.application_status,
             # ── Metadata ──
             errors=state.errors,
             completed_agents=state.completed_agents,
