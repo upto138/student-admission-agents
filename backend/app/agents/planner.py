@@ -1,28 +1,32 @@
 """
-Planner Agent — Phân tích thông tin tuyển sinh và sinh kế hoạch chuẩn bị hồ sơ.
+Planner Agent — Analyzes admission data and generates a structured preparation plan.
 
-Vị trí trong pipeline:
+Position in pipeline:
     ResearcherAgent → [PlannerAgent] → AdvisorAgent → ApplicationAgent
 
-Input (từ AgentState):
-    state.research_result   — output của ResearcherAgent (đã có thông tin tuyển sinh)
-    state.student_profile   — hồ sơ học sinh (có thể thiếu trường)
+Input (from AgentState):
+    state.research_result   — ResearcherAgent output (structured admission info)
+    state.student_profile   — student profile (may have missing fields)
 
-Output (ghi vào AgentState):
+Output (written to AgentState):
     state.plan_result       — PlanResult: checklist + timeline + missing_questions + risks
 
-Cách hoạt động (giống ResearcherAgent):
-    1. _get_agent()         → Lazy-init FoundryChatClient agent
-    2. _build_user_message()→ Format research_result + student_profile → message gửi LLM
-    3. agent.run(message)   → Framework gọi tools tự động (v1: không có tools)
-    4. response.text        → raw text từ LLM
-    5. _parse_plan_result() → Trích JSON → PlanResult
-    6. Ghi vào state và trả về
+How it works (mirrors ResearcherAgent pattern):
+    1. _get_agent()          → Lazy-init FoundryChatClient agent
+    2. _build_user_message() → Format research_result + student_profile → LLM message
+    3. agent.run(message)    → Framework handles tool calls automatically
+    4. response.text         → raw text from LLM
+    5. _parse_plan_result()  → Extract JSON → PlanResult
+    6. Write to state and return
+
+Tools (via PlannerToolset):
+    query_knowledge_base — Queries ChromaDB / Azure AI Search for additional
+    admission regulations, scholarship conditions, or school-specific policies
+    that the Researcher may not have covered for the specific university/major.
 
 Extensibility (Strategy pattern):
-    Xem class PlannerToolset bên dưới. Khi module RAG chuyên biệt hoặc
-    regulation_tool sẵn sàng, chỉ cần sửa PlannerToolset.tools — không
-    cần đổi logic của agent.
+    See PlannerToolset below. To add more tools in the future,
+    only modify PlannerToolset.tools — no changes to agent logic needed.
 """
 from __future__ import annotations
 
@@ -36,6 +40,7 @@ from typing import Optional
 
 from agent_framework import Agent
 from agent_framework.foundry import FoundryChatClient
+from app.tools.rag_tool import ALL_RAG_TOOLS
 from azure.identity import DefaultAzureCredential, AzureCliCredential
 
 from app.agents.base import BaseAgent
@@ -55,28 +60,23 @@ logger = logging.getLogger(__name__)
 
 class PlannerToolset:
     """
-    Strategy object: kiểm soát danh sách tools mà Planner Agent có thể gọi.
+    Strategy object: controls the list of tools available to the Planner Agent.
 
-    --- HIỆN TẠI (v1) ---
-    Không có tools. Planner suy luận thuần túy trên data đã có trong AgentState:
-      - state.research_result  (Researcher đã query RAG + scrape web rồi lưu vào đây)
-      - state.student_profile  (hồ sơ học sinh từ frontend)
+    --- CURRENT (v2) ---
+    Uses query_knowledge_base to supplement the Researcher's findings:
+      - Researcher already scraped URLs and did an initial RAG query.
+      - Planner can do a focused, planning-specific RAG query to verify:
+          * Document requirements for a specific university/major
+          * Scholarship eligibility conditions
+          * Ministry of Education (MOET) regulations
+          * Edge cases the Researcher may not have covered
 
-    Lý do không gắn RAG tool ngay:
-      ResearcherAgent đã gọi query_knowledge_base() và lưu kết quả vào
-      state.research_result. Gắn thêm cho Planner sẽ gây double-query cùng
-      một knowledge base mà không thu được thêm thông tin.
-
-    --- TƯƠNG LAI: bỏ comment khi các module sau sẵn sàng ---
-
-    # from app.tools.rag_tool import ALL_RAG_TOOLS
-    # → Cho Planner re-query KB để lấy thêm quy định tuyển sinh theo ngành/trường
-    #   (hữu ích khi KB đã có đủ dữ liệu về học bổng, điều kiện đặc biệt)
-
-    # from app.tools.regulation_tool import ALL_REGULATION_TOOLS  # chưa build
-    # → Tool chuyên biệt cho quy định Bộ GD-ĐT (khi KB quy định đã được populate)
+    --- FUTURE: uncomment when the following modules are ready ---
+    # from app.tools.regulation_tool import ALL_REGULATION_TOOLS  # not built yet
+    # → Specialized tool for MOET regulations (when KB is populated with official docs)
     """
-    tools: list = []  # v1: để trống — chỉ sửa chỗ này khi có tool mới
+    # query_knowledge_base: tra cứu thêm quy định, học bổng, điều kiện đặc biệt
+    tools: list = ALL_RAG_TOOLS
 
 
 ALL_PLANNER_TOOLS = PlannerToolset.tools
@@ -393,20 +393,20 @@ def _get_credential():
 
 class PlannerAgent(BaseAgent):
     """
-    Planner Agent sử dụng Microsoft Agent Framework (FoundryChatClient).
+    Planner Agent using Microsoft Agent Framework (FoundryChatClient).
 
-    Cách hoạt động:
-    1. Khởi tạo FoundryChatClient với FOUNDRY_PROJECT_ENDPOINT + credential
-    2. Tạo Agent với .as_agent(tools=self._tools, instructions=...)
-       - v1: self._tools = [] (không tools, suy luận thuần túy)
-       - future: truyền extra_tools vào constructor để mở rộng
-    3. Gọi agent.run(message) — framework xử lý tool call tự động (nếu có)
+    How it works:
+    1. Initialize FoundryChatClient with FOUNDRY_PROJECT_ENDPOINT + credential
+    2. Create Agent with .as_agent(tools=self._tools, instructions=...)
+       - self._tools = ALL_RAG_TOOLS (query_knowledge_base) by default
+       - extra_tools can be injected from outside for future extensions
+    3. Call agent.run(message) — framework handles tool calls automatically
     4. Parse response.text → PlanResult
-    5. Cập nhật AgentState và trả về
+    5. Update AgentState and return
 
     Extensibility:
-        PlannerAgent(verbose=True, extra_tools=ALL_RAG_TOOLS)
-        → inject tools từ ngoài khi module mới sẵn sàng, không đổi logic bên trong
+        PlannerAgent(verbose=True, extra_tools=[my_regulation_tool])
+        → inject additional tools when new modules are ready, without changing internal logic
     """
 
     name = "planner"
@@ -442,7 +442,10 @@ class PlannerAgent(BaseAgent):
                 tools=self._tools,
             )
 
-            tool_names = [t.__name__ for t in self._tools] if self._tools else ["(none)"]
+            tool_names = (
+                [getattr(t, "__name__", getattr(t, "name", repr(t))) for t in self._tools]
+                if self._tools else ["(none)"]
+            )
             self.log(
                 f"FoundryChatClient initialized. Endpoint: {project_endpoint} | "
                 f"Model: {model} | Tools: {tool_names}",
@@ -453,25 +456,25 @@ class PlannerAgent(BaseAgent):
 
     async def run(self, state: AgentState) -> AgentState:
         """
-        Chạy Planner Agent và cập nhật AgentState với kết quả.
+        Run the Planner Agent and update AgentState with the result.
 
-        Guard: nếu research_result chưa có → ghi lỗi và trả về sớm.
-        HITL gate: nếu còn missing_questions → set requires_confirmation = True.
+        Guard: if research_result is None → log error and return early.
+        HITL gate: if missing_questions is not empty → set requires_confirmation = True.
 
         Args:
-            state: AgentState có research_result và student_profile.
+            state: AgentState with research_result and student_profile.
 
         Returns:
-            AgentState đã được cập nhật với plan_result.
+            AgentState updated with plan_result.
         """
         state.current_agent = self.name
-        self.log("Bắt đầu lập kế hoạch...", "info")
+        self.log("Starting planning task...", "info")
 
-        # ── Guard: Researcher phải chạy trước ──────────────────────────────
+        # ── Guard: Researcher must run first ─────────────────────────────
         if state.research_result is None:
             msg = (
-                "PlannerAgent: không có research_result trong state. "
-                "ResearcherAgent chưa chạy hoặc đã thất bại?"
+                "PlannerAgent: no research_result in state. "
+                "ResearcherAgent has not run or has failed."
             )
             logger.error(msg)
             state.add_error(msg)
@@ -481,12 +484,12 @@ class PlannerAgent(BaseAgent):
             agent = self._get_agent()
             user_message = _build_user_message(state)
 
-            self.log(f"Gửi message tới agent ({len(user_message)} ký tự)...", "info")
+            self.log(f"Sending message to agent ({len(user_message)} chars)...", "info")
 
             response = await agent.run(user_message)
             raw_text = response.text
 
-            self.log(f"Nhận response: {len(raw_text)} ký tự", "info")
+            self.log(f"Raw response: {len(raw_text)} chars", "info")
 
             # ── Parse kết quả ──────────────────────────────────────────────
             plan_result = _parse_plan_result(raw_text)
@@ -498,8 +501,8 @@ class PlannerAgent(BaseAgent):
                 state.requires_confirmation = True
                 state.application_status = "pending_info"
                 self.log(
-                    f"Còn {len(plan_result.missing_questions)} câu hỏi chưa trả lời. "
-                    f"Agent 3 bị chặn cho đến khi học sinh cung cấp thêm thông tin.",
+                    f"{len(plan_result.missing_questions)} missing questions found. "
+                    f"Agent 3 blocked until student provides more information.",
                     "info",
                 )
             elif plan_result.needs_human_confirmation:
@@ -507,15 +510,15 @@ class PlannerAgent(BaseAgent):
                 state.application_status = "pending_confirmation"
 
             self.log(
-                f"Lập kế hoạch xong. "
-                f"Checklist: {len(plan_result.checklist)} mục | "
-                f"Timeline: {len(plan_result.timeline)} mốc | "
-                f"Câu hỏi còn thiếu: {len(plan_result.missing_questions)}",
+                f"Planning complete. "
+                f"Checklist: {len(plan_result.checklist)} items | "
+                f"Timeline: {len(plan_result.timeline)} tasks | "
+                f"Missing questions: {len(plan_result.missing_questions)}",
                 "info",
             )
 
         except Exception as e:
-            logger.exception(f"PlannerAgent thất bại: {e}")
+            logger.exception(f"PlannerAgent failed: {e}")
             state.add_error(f"PlannerAgent error: {str(e)}")
             state.plan_result = PlanResult()
 
@@ -523,15 +526,15 @@ class PlannerAgent(BaseAgent):
 
     async def run_stream(self, state: AgentState):
         """
-        Streaming version — yield từng chunk text từ LLM.
-        Dùng cho WebSocket endpoint hoặc realtime UI.
+        Streaming version — yield individual text chunks from LLM.
+        Used for WebSocket endpoint or real-time UI.
 
         Usage:
             async for chunk in planner.run_stream(state):
                 print(chunk, end="", flush=True)
         """
         if state.research_result is None:
-            yield "[ERROR] PlannerAgent: research_result chưa có trong state."
+            yield "[ERROR] PlannerAgent: research_result not found in state."
             return
 
         try:
@@ -543,5 +546,5 @@ class PlannerAgent(BaseAgent):
                     yield chunk.text
 
         except Exception as e:
-            logger.exception(f"PlannerAgent stream thất bại: {e}")
+            logger.exception(f"PlannerAgent stream failed: {e}")
             yield f"[ERROR] {str(e)}"
