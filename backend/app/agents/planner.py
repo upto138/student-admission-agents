@@ -75,7 +75,7 @@ class PlannerToolset:
     # from app.tools.regulation_tool import ALL_REGULATION_TOOLS  # not built yet
     # → Specialized tool for MOET regulations (when KB is populated with official docs)
     """
-    # query_knowledge_base: tra cứu thêm quy định, học bổng, điều kiện đặc biệt
+    # query_knowledge_base: look up additional regulations, scholarships, or special conditions
     tools: list = ALL_RAG_TOOLS
 
 
@@ -87,65 +87,68 @@ ALL_PLANNER_TOOLS = PlannerToolset.tools
 # =============================================================================
 
 def _load_prompt() -> str:
-    """Đọc system prompt từ file prompts/planner.txt."""
+    """Read system prompt from prompts/planner.txt."""
     prompt_path = Path(__file__).parent.parent / "prompts" / "planner.txt"
     if prompt_path.exists():
         return prompt_path.read_text(encoding="utf-8")
 
     logger.warning(f"Prompt file not found: {prompt_path}. Using fallback prompt.")
     return (
-        "Bạn là Planner Agent trong hệ thống tư vấn tuyển sinh đại học Việt Nam. "
-        "Nhiệm vụ của bạn là phân tích thông tin tuyển sinh và hồ sơ học sinh, "
-        "sau đó sinh ra danh sách hồ sơ cần chuẩn bị và timeline. "
-        "Luôn trả về JSON theo schema PlanResult."
+        "You are the Planner Agent in a Vietnamese university admission advisory system. "
+        "Analyze the admission data and student profile, "
+        "then produce a document checklist and preparation timeline. "
+        "Always return valid JSON matching the PlanResult schema."
     )
 
 
 def _build_user_message(state: AgentState) -> str:
     """
-    Tạo user message từ AgentState để gửi cho LLM.
+    Build user message from AgentState to send to the LLM.
 
-    Bao gồm:
-      - Thông tin tuyển sinh (từ research_result)
-      - Hồ sơ học sinh (student_profile)
-      - Yêu cầu output JSON theo schema PlanResult
+    Includes:
+      - Admission info from research_result
+      - Student profile (student_profile)
+      - Output requirement: valid JSON matching PlanResult schema
+
+    Note: Section labels and field values are intentionally kept in Vietnamese
+    so the LLM produces Vietnamese output consistent with the system prompt.
     """
     parts = []
     result = state.research_result
     profile = state.student_profile
 
-    # ── Thông tin tuyển sinh từ Researcher ──────────────────────────────────
+    # ── Admission info from ResearcherAgent ─────────────────────────────────
     if result:
         uni_summaries = []
         for u in result.universities:
             summary_parts = []
             if u.university_name:
-                summary_parts.append(f"Trường: {u.university_name}")
+                summary_parts.append(f"University: {u.university_name}")
             if u.major:
-                summary_parts.append(f"Ngành: {u.major}")
+                summary_parts.append(f"Major: {u.major}")
             if u.admission_method:
-                summary_parts.append(f"Phương thức: {u.admission_method}")
+                summary_parts.append(f"Admission method: {u.admission_method}")
             if u.deadline:
-                summary_parts.append(f"Hạn nộp: {u.deadline}")
+                summary_parts.append(f"Deadline: {u.deadline}")
             if u.required_documents:
                 docs = ", ".join(u.required_documents)
-                summary_parts.append(f"Giấy tờ cần: {docs}")
+                summary_parts.append(f"Required documents: {docs}")
             if u.benchmark_score is not None:
-                summary_parts.append(f"Điểm chuẩn: {u.benchmark_score}")
+                summary_parts.append(f"Benchmark score: {u.benchmark_score}")
             if u.notes:
-                summary_parts.append(f"Ghi chú: {u.notes}")
+                summary_parts.append(f"Notes: {u.notes}")
             if summary_parts:
                 uni_summaries.append("\n  ".join(summary_parts))
 
         if uni_summaries:
             parts.append(
-                "**Thông tin tuyển sinh (từ Researcher Agent):**\n"
+                "**Admission data (from ResearcherAgent):**\n"
                 + "\n---\n".join(uni_summaries)
             )
 
         if result.general_requirements:
             parts.append(
-                "**Yêu cầu chung:**\n"
+                "**General requirements:**\n"
                 + "\n".join(f"- {r}" for r in result.general_requirements)
             )
 
@@ -153,72 +156,72 @@ def _build_user_message(state: AgentState) -> str:
             deadlines = "\n".join(
                 f"- {k}: {v}" for k, v in result.important_deadlines.items()
             )
-            parts.append(f"**Các mốc thời gian quan trọng:**\n{deadlines}")
+            parts.append(f"**Important deadlines:**\n{deadlines}")
 
         if result.admission_methods:
             parts.append(
-                "**Phương thức xét tuyển:**\n"
+                "**Admission methods:**\n"
                 + "\n".join(f"- {m}" for m in result.admission_methods)
             )
 
         if result.sources:
             parts.append(
-                "**Nguồn thông tin:**\n"
+                "**Sources:**\n"
                 + "\n".join(f"- {s}" for s in result.sources)
             )
 
-    # ── Hồ sơ học sinh ──────────────────────────────────────────────────────
+    # ── Student profile ───────────────────────────────────────────────────────
     profile_lines = []
     if profile.name:
-        profile_lines.append(f"- Họ tên: {profile.name}")
+        profile_lines.append(f"- Name: {profile.name}")
     else:
-        profile_lines.append("- Họ tên: [CHƯA CÓ]")
+        profile_lines.append("- Name: [NOT PROVIDED]")
 
-    profile_lines.append(f"- GPA: {profile.gpa if profile.gpa is not None else '[CHƯA CÓ]'}")
+    profile_lines.append(f"- GPA: {profile.gpa if profile.gpa is not None else '[NOT PROVIDED]'}")
 
     if profile.preferred_majors:
-        profile_lines.append(f"- Ngành mong muốn: {', '.join(profile.preferred_majors)}")
+        profile_lines.append(f"- Preferred major: {', '.join(profile.preferred_majors)}")
     else:
-        profile_lines.append("- Ngành mong muốn: [CHƯA CÓ]")
+        profile_lines.append("- Preferred major: [NOT PROVIDED]")
 
     if profile.preferred_universities:
-        profile_lines.append(f"- Trường mong muốn: {', '.join(profile.preferred_universities)}")
+        profile_lines.append(f"- Preferred university: {', '.join(profile.preferred_universities)}")
 
     if profile.target_scores:
         scores = json.dumps(profile.target_scores, ensure_ascii=False)
-        profile_lines.append(f"- Điểm mục tiêu: {scores}")
+        profile_lines.append(f"- Target scores: {scores}")
 
     if profile.extra_activities:
-        profile_lines.append(f"- Hoạt động ngoại khóa: {', '.join(profile.extra_activities)}")
+        profile_lines.append(f"- Extracurricular activities: {', '.join(profile.extra_activities)}")
 
     if profile.notes:
-        profile_lines.append(f"- Ghi chú: {profile.notes}")
+        profile_lines.append(f"- Notes: {profile.notes}")
 
-    parts.append("**Hồ sơ học sinh:**\n" + "\n".join(profile_lines))
+    parts.append("**Student profile:**\n" + "\n".join(profile_lines))
 
-    # ── Yêu cầu output ──────────────────────────────────────────────────────
+    # ── Output requirement ──────────────────────────────────────────────────
     parts.append(
-        "**Yêu cầu output:** Trả về JSON hợp lệ theo schema PlanResult:\n"
+        "**Request for output:** Return valid JSON matching the PlanResult schema:\n"
         "{\n"
-        '  "missing_questions": ["câu hỏi 1 nếu thiếu thông tin học sinh"],\n'
+        '  "missing_questions": ["question if a required student profile field is missing"],\n'
         '  "checklist": [\n'
         '    {\n'
-        '      "title": "Tên giấy tờ",\n'
+        '      "title": "Document name",\n'
         '      "status": "pending",\n'
         '      "required": true,\n'
-        '      "reason": "Lý do cần giấy tờ này",\n'
+        '      "reason": "Reason this document is required",\n'
         '      "source": "admission_news"\n'
         '    }\n'
         '  ],\n'
         '  "timeline": [\n'
         '    {\n'
         '      "date": "2026-05-15",\n'
-        '      "task": "Mô tả việc cần làm",\n'
+        '      "task": "Task description",\n'
         '      "priority": "high",\n'
-        '      "reason": "Lý do ưu tiên cao"\n'
+        '      "reason": "Reason for high priority"\n'
         '    }\n'
         '  ],\n'
-        '  "risks": ["Rủi ro 1 nếu có"],\n'
+        '  "risks": ["Risk description"],\n'
         '  "needs_human_confirmation": true\n'
         "}"
     )
@@ -228,13 +231,13 @@ def _build_user_message(state: AgentState) -> str:
 
 def _parse_plan_result(raw_text: str) -> PlanResult:
     """
-    Parse JSON từ response của LLM thành PlanResult.
+    Parse LLM response text into a PlanResult.
 
-    Chiến lược (giống _parse_research_result):
-      1. Thử parse toàn bộ text là JSON thuần
-      2. Thử tìm fenced code block (```json ... ```)
-      3. Quét tìm JSON object trong text
-      4. Fallback: trả về PlanResult rỗng, không crash
+    Extraction strategies (mirrors _parse_research_result in ResearcherAgent):
+      1. Try parsing the full text as pure JSON
+      2. Try extracting JSON from a fenced code block (```json ... ```)
+      3. Scan the raw text for any embedded JSON object
+      4. Fallback: return an empty PlanResult — never raises
     """
     text = (raw_text or "").strip()
     if not text:
@@ -252,7 +255,7 @@ def _parse_plan_result(raw_text: str) -> PlanResult:
         return None
 
     def _try_parse(candidate: str) -> Optional[dict]:
-        """JSON thuần → ast.literal_eval fallback."""
+        """Attempt pure JSON parse, fall back to ast.literal_eval."""
         if not candidate:
             return None
         try:
@@ -265,7 +268,7 @@ def _parse_plan_result(raw_text: str) -> PlanResult:
             return None
 
     def _best_json_in_text(candidate: str) -> Optional[dict]:
-        """Quét tìm JSON object tốt nhất trong text."""
+        """Scan text and return the best-scoring JSON object found."""
         if not candidate:
             return None
         decoder = json.JSONDecoder()
@@ -286,12 +289,12 @@ def _parse_plan_result(raw_text: str) -> PlanResult:
                     return best
         return best
 
-    # ── Thử 1: toàn bộ text là JSON thuần ──────────────────────────────────
+    # ── Strategy 1: full text is pure JSON ──────────────────────────────────
     decoded = _try_parse(text)
     if decoded is not None:
         return _dict_to_plan_result(decoded)
 
-    # ── Thử 2: fenced code block ─────────────────────────────────────────────
+    # ── Strategy 2: JSON inside a fenced code block ───────────────────────────
     best_from_fence: Optional[dict] = None
     best_fence_score = -1
     for fence_match in re.finditer(r"```(?:json|JSON)?\s*(.*?)\s*```", text, re.DOTALL):
@@ -305,22 +308,22 @@ def _parse_plan_result(raw_text: str) -> PlanResult:
     if best_from_fence is not None:
         return _dict_to_plan_result(best_from_fence)
 
-    # ── Thử 3: quét raw text ────────────────────────────────────────────────
+    # ── Strategy 3: scan raw text for embedded JSON ──────────────────────────
     decoded = _best_json_in_text(text)
     if decoded is not None:
         return _dict_to_plan_result(decoded)
 
-    # ── Fallback: trả về PlanResult rỗng ───────────────────────────────────
+    # ── Strategy 4: fallback — return empty PlanResult ───────────────────────
     logger.warning(
-        "PlannerAgent: không parse được JSON từ response. "
-        "Trả về PlanResult rỗng. text[:400]=%r",
+        "PlannerAgent: could not parse JSON from LLM response. "
+        "Returning empty PlanResult. text[:400]=%r",
         text[:400].replace("\n", "\\n"),
     )
     return PlanResult()
 
 
 def _dict_to_plan_result(data: dict) -> PlanResult:
-    """Convert dict → PlanResult, xử lý dữ liệu thiếu/sai định dạng."""
+    """Convert a raw dict to PlanResult, handling missing or malformed fields gracefully."""
 
     def _as_list(value) -> list:
         if value is None:
@@ -339,7 +342,7 @@ def _dict_to_plan_result(data: dict) -> PlanResult:
             return value.lower() in ("true", "1", "yes")
         return bool(value)
 
-    # ── Parse checklist ──────────────────────────────────────────────────────
+    # ── Parse checklist items ────────────────────────────────────────────────
     checklist: list[ChecklistItem] = []
     for item in _as_list(data.get("checklist")):
         if not isinstance(item, dict):
@@ -353,9 +356,9 @@ def _dict_to_plan_result(data: dict) -> PlanResult:
                 source=str(item.get("source", "")).strip(),
             ))
         except Exception as e:
-            logger.warning(f"PlannerAgent: bỏ qua ChecklistItem không hợp lệ: {e}. Item={item!r}")
+            logger.warning(f"PlannerAgent: skipping malformed ChecklistItem: {e}. item={item!r}")
 
-    # ── Parse timeline ───────────────────────────────────────────────────────
+    # ── Parse timeline tasks ──────────────────────────────────────────────────
     timeline: list[TimelineTask] = []
     for task in _as_list(data.get("timeline")):
         if not isinstance(task, dict):
@@ -368,7 +371,7 @@ def _dict_to_plan_result(data: dict) -> PlanResult:
                 reason=str(task.get("reason", "")).strip(),
             ))
         except Exception as e:
-            logger.warning(f"PlannerAgent: bỏ qua TimelineTask không hợp lệ: {e}. Task={task!r}")
+            logger.warning(f"PlannerAgent: skipping malformed TimelineTask: {e}. task={task!r}")
 
     return PlanResult(
         missing_questions=_as_list(data.get("missing_questions")),
@@ -380,7 +383,7 @@ def _dict_to_plan_result(data: dict) -> PlanResult:
 
 
 def _get_credential():
-    """Lấy Azure credential theo thứ tự ưu tiên (giống ResearcherAgent)."""
+    """Resolve Azure credential with priority fallback (mirrors ResearcherAgent)."""
     try:
         return DefaultAzureCredential()
     except Exception:
@@ -410,11 +413,11 @@ class PlannerAgent(BaseAgent):
     """
 
     name = "planner"
-    description = "Phân tích thông tin tuyển sinh và sinh kế hoạch chuẩn bị hồ sơ"
+    description = "Analyzes admission data and generates a structured document preparation plan"
 
     def __init__(self, verbose: bool = False, extra_tools: list | None = None):
         super().__init__(verbose=verbose)
-        # Gộp tools mặc định (PlannerToolset) + tools inject từ bên ngoài
+        # Merge default toolset (PlannerToolset) with any externally injected tools
         self._tools = ALL_PLANNER_TOOLS + (extra_tools or [])
         self._foundry_agent: Optional[Agent] = None
 
@@ -426,8 +429,8 @@ class PlannerAgent(BaseAgent):
 
             if not project_endpoint:
                 raise EnvironmentError(
-                    "Thiếu biến môi trường FOUNDRY_PROJECT_ENDPOINT trong .env.\n"
-                    "Xem file .env.example để biết cách cấu hình."
+                    "Missing required environment variable: FOUNDRY_PROJECT_ENDPOINT.\n"
+                    "See .env.example for configuration instructions."
                 )
 
             client = FoundryChatClient(
@@ -491,12 +494,12 @@ class PlannerAgent(BaseAgent):
 
             self.log(f"Raw response: {len(raw_text)} chars", "info")
 
-            # ── Parse kết quả ──────────────────────────────────────────────
+            # ── Parse LLM response ─────────────────────────────────────────
             plan_result = _parse_plan_result(raw_text)
             state.plan_result = plan_result
             state.mark_agent_done(self.name)
 
-            # ── HITL gate ──────────────────────────────────────────────────
+            # ── HITL gate: block Agent 3 if profile is incomplete ──────────
             if plan_result.missing_questions:
                 state.requires_confirmation = True
                 state.application_status = "pending_info"

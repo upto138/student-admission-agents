@@ -328,13 +328,13 @@ class TestBuildUserMessage:
     def test_marks_missing_name_as_placeholder(
         self, sample_research_result, incomplete_student_profile
     ):
-        """Incomplete profile must have [CHƯA CÓ] placeholder for missing fields."""
+        """Incomplete profile must have [NOT PROVIDED] placeholder for missing fields."""
         state = AgentState(
             research_result=sample_research_result,
             student_profile=incomplete_student_profile,
         )
         message = _build_user_message(state)
-        assert "CHƯA CÓ" in message
+        assert "NOT PROVIDED" in message
 
     def test_empty_universities_does_not_crash(self):
         """_build_user_message must not crash when research_result has no universities."""
