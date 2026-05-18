@@ -73,6 +73,9 @@ class ResearchResponse(BaseModel):
     plan_result: Optional[Dict[str, Any]] = None
     missing_questions: List[str] = Field(default_factory=list)
     needs_human_confirmation: bool = False
+    # ── Advisor fields ──
+    advisor_result: Optional[Dict[str, Any]] = None   # Structured AdvisorResult
+    advisor_response: str = ""                         # Backward compat (= narrative)
     # ── HITL / Pipeline state ──
     requires_confirmation: bool = False   # True = pipeline bị chặn (HITL gate)
     application_status: str = ""          # pending_info | pending_confirmation | ""
@@ -88,7 +91,7 @@ async def health_check():
     """Health check endpoint."""
     return {
         "status": "ok",
-        "agents": ["researcher", "planner", "advisor (coming)", "application (coming)"],
+        "agents": ["researcher", "planner", "advisor", "application (coming)"],
         "foundry_endpoint": os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "NOT SET"),
         "foundry_model": os.environ.get("FOUNDRY_MODEL", "NOT SET"),
     }
@@ -99,8 +102,8 @@ async def chat(request: ChatRequest):
     """
     The main endpoint - Receive requests from student and run the workflow.
 
-    Current pipeline: ResearcherAgent → PlannerAgent.
-    TODO: AdvisorAgent → ApplicationAgent.
+    Current pipeline: ResearcherAgent → PlannerAgent → AdvisorAgent.
+    TODO: ApplicationAgent.
     """
     logger.info(f"[API] /chat received: '{request.message[:80]}...' | URLs: {len(request.urls)}")
 
@@ -146,6 +149,11 @@ async def chat(request: ChatRequest):
             needs_human_confirmation=(
                 state.plan_result.needs_human_confirmation if state.plan_result else False
             ),
+            # ── Advisor fields ──
+            advisor_result=(
+                state.advisor_result.model_dump() if state.advisor_result else None
+            ),
+            advisor_response=state.advisor_response,
             # ── HITL / Pipeline state ──
             requires_confirmation=state.requires_confirmation,
             application_status=state.application_status,
