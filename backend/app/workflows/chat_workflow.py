@@ -5,9 +5,9 @@ Orchestrates các agent theo thứ tự:
     Researcher → Planner → Advisor → Application
 
 Hiện tại:
-    Bước 1 (Researcher)  ✔ Hoàn chỉnh
-    Bước 2 (Planner)    ✔ Hoàn chỉnh
-    Bước 3 (Advisor)    TODO
+    Bước 1 (Researcher)   ✔ Hoàn chỉnh
+    Bước 2 (Planner)     ✔ Hoàn chỉnh
+    Bước 3 (Advisor)     ✔ Hoàn chỉnh
     Bước 4 (Application) TODO
 """
 from __future__ import annotations
@@ -18,6 +18,7 @@ from typing import AsyncIterator
 
 from app.agents.researcher import ResearcherAgent
 from app.agents.planner import PlannerAgent
+from app.agents.advisor import AdvisorAgent
 from app.schemas.agent_state import AgentState, StudentProfile
 
 logger = logging.getLogger(__name__)
@@ -30,13 +31,14 @@ class ChatWorkflow:
     Pipeline hiện tại:
       Bước 1: ResearcherAgent  — Thu thập và trích xuất thông tin tuyển sinh
       Bước 2: PlannerAgent     — Lập checklist + timeline + phát hiện thiếu thông tin
-      (Bước 3: AdvisorAgent)  — TODO
+      Bước 3: AdvisorAgent    — Giải thích kế hoạch, đưa lời khuyên cá nhân hóa
       (Bước 4: ApplicationAgent) — TODO nếu user xác nhận
     """
 
     def __init__(self, verbose: bool = False):
         self.researcher = ResearcherAgent(verbose=verbose)
         self.planner = PlannerAgent(verbose=verbose)
+        self.advisor = AdvisorAgent(verbose=verbose)
         self.verbose = verbose
 
     async def run(self, state: AgentState) -> AgentState:
@@ -46,7 +48,7 @@ class ChatWorkflow:
         Pipeline:
           1. ResearcherAgent — thu thập thông tin tuyển sinh từ URL/query
           2. PlannerAgent    — lập checklist + timeline, chặn Agent 3 nếu thiếu thông tin
-          3. AdvisorAgent    — TODO
+          3. AdvisorAgent    — giải thích kế hoạch, đưa lời khuyên cá nhân hóa
           4. ApplicationAgent — TODO (chỉ chạy sau khi học sinh xác nhận)
 
         Args:
@@ -77,9 +79,18 @@ class ChatWorkflow:
                 "hoặc có lỗi."
             )
 
-        # ── Bước 3: Advisor (TODO) ───────────────────────────────────
-        # from app.agents.advisor import AdvisorAgent
-        # state = await AdvisorAgent(verbose=self.verbose).run(state)
+        # ── Bước 3: Advisor ───────────────────────────────────────
+        # Advisor luôn chạy khi có plan_result (theo Refined plan Section 7.1).
+        # Advisor tự điều chỉnh độ chi tiết và nêu caveats nếu:
+        #   - plan_result.needs_human_confirmation = True
+        #   - plan_result.missing_questions không rỗng
+        if state.plan_result is not None:
+            logger.info("[Workflow] → Chạy AdvisorAgent")
+            state = await self.advisor.run(state)
+        else:
+            logger.warning(
+                "[Workflow] Bỏ qua AdvisorAgent do không có plan_result."
+            )
 
         # ── Bước 4: Application (TODO) ───────────────────────────────
         # Chỉ chạy sau khi học sinh xác nhận (state.requires_confirmation = False)

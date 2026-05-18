@@ -8,6 +8,9 @@ Schemas:
   ChecklistItem     — một mục trong danh sách hồ sơ (output Planner)
   TimelineTask      — một mốc trong timeline chuẩn bị (output Planner)
   PlanResult        — toàn bộ output của PlannerAgent
+  RiskItem          — một rủi ro cụ thể (output Advisor)
+  ActionStep        — một bước hành động cụ thể (output Advisor)
+  AdvisorResult     — toàn bộ output của AdvisorAgent
   AdmissionStep     — một bước trong quy trình tuyển sinh
   AdmissionPlan     — kế hoạch tổng thể (legacy, đơn giản hơn PlanResult)
   AgentState        — state dùng chung cho toàn bộ pipeline
@@ -106,6 +109,46 @@ class PlanResult(BaseModel):
     needs_human_confirmation: bool = False
 
 
+# =============================================================================
+# Advisor Agent schemas
+# =============================================================================
+
+class RiskItem(BaseModel):
+    """Một rủi ro cụ thể được phân tích bởi AdvisorAgent."""
+    description: str                              # Mô tả rủi ro
+    severity: str = "medium"                      # high | medium | low
+    mitigation: str = ""                          # Cách giảm thiểu
+
+
+class ActionStep(BaseModel):
+    """Một bước hành động cụ thể do AdvisorAgent đề xuất."""
+    step: str                                     # Mô tả hành động
+    priority: str = "medium"                      # high | medium | low
+    deadline_hint: Optional[str] = None           # Gợi ý thời hạn (YYYY-MM-DD hoặc None)
+
+
+class AdvisorResult(BaseModel):
+    """
+    Output đầy đủ của AdvisorAgent.
+
+    Hybrid approach: structured schema + free-text narrative.
+    - narrative: phần tư vấn dạng văn bản tự nhiên (phần chính, hiển thị cho user)
+    - personalized_advice: lời khuyên dạng bullet points
+    - risk_analysis: phân tích rủi ro có cấu trúc
+    - action_steps: các bước hành động cụ thể, ưu tiên theo deadline
+    - confidence_level: đánh giá độ đầy đủ của dữ liệu đầu vào
+    - caveats: giới hạn, mâu thuẫn dữ liệu, hoặc thông tin thiếu
+    """
+    narrative: str = ""                           # Tư vấn dạng free-text (phần chính)
+    personalized_advice: List[str] = Field(default_factory=list)
+    risk_analysis: List[RiskItem] = Field(default_factory=list)
+    action_steps: List[ActionStep] = Field(default_factory=list)
+    confidence_level: str = "medium"              # high | medium | low
+    caveats: List[str] = Field(default_factory=list)
+    advised_at: Optional[datetime] = None         # Timestamp
+
+### ================= End advisor schemas =================
+
 class AdmissionStep(BaseModel):
     """One step in the selection process"""
     step_number: int
@@ -143,7 +186,8 @@ class AgentState(BaseModel):
     research_result: Optional[ResearchResult] = None
     plan_result: Optional[PlanResult] = None
     admission_plan: Optional[AdmissionPlan] = None  # legacy — dùng plan_result thay thế
-    advisor_response: str = ""
+    advisor_result: Optional[AdvisorResult] = None   # Structured output from AdvisorAgent
+    advisor_response: str = ""                        # Backward compat — = advisor_result.narrative
     application_status: str = ""  # draft / pending_confirmation / submitted / failed
 
     # HITL (Human-in-the-Loop)
